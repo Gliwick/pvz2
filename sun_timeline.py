@@ -405,11 +405,7 @@ def simulate(pairing, count, positions=None, strategy=None,
     timeline = []
 
     for t in range(0, duration * 1000 + 1, STEP_MS):
-        if not night and t >= SKY_FIRST_MS and (t - SKY_FIRST_MS) % SKY_PERIOD_MS == 0:
-            sun += SKY_SUN
-        for p in lawn.plants:
-            if isinstance(p.plant, SunProducer) and production_due(t, p):
-                sun += p.plant.production(t - p.at, p, lawn)
+        # === plant ===
         if pending and pending.at <= t:
             plant = pending.plant
             pending = None
@@ -420,10 +416,19 @@ def simulate(pairing, count, positions=None, strategy=None,
             # Cost and recharge start on landing, not on selection: this emulates the
             # delay between a human selecting a plant and actually planting it.
             recharge_ready[plant] = t + plant.recharge_ms
+
+        # === sun production ===
+        if not night and t >= SKY_FIRST_MS and (t - SKY_FIRST_MS) % SKY_PERIOD_MS == 0:
+            sun += SKY_SUN
+        for p in lawn.plants:
+            if isinstance(p.plant, SunProducer) and production_due(t, p):
+                sun += p.plant.production(t - p.at, p, lawn)
         # The n-th addon pairs with the n-th base plant, whichever went down first.
         if pairing.addon:
             for host, addon in zip(lawn.by_type[pairing.base], lawn.by_type[pairing.addon]):
                 sun += pairing.addon.bonus(t, host, addon)
+
+        # === select for planting ===
         # Plant whichever is ready; the strategy decides who goes first.
         # One planting at a time, so plantings are at least a delay apart.
         if pending is None:
@@ -432,6 +437,7 @@ def simulate(pairing, count, positions=None, strategy=None,
                         and sun >= plant.cost):
                     pending = Pending(plant, t + PLANT_DELAY_MS)
                     break
+
         if t % 1000 == 0:
             timeline.append(sun)
     return timeline
