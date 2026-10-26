@@ -11,9 +11,8 @@ Arguments:
             (sunflower, twinsunflower, primalsunflower, lemonaid, shinevine,
             sunshroom, moonflower), or <plant>+shinevine / <plant>+goldleaf (e.g.
             sunflower+shinevine) to plant pairs of <plant> with a shinevine or
-            goldleaf on top. Moonflower cannot be combined with shinevine
-            (moonflower+goldleaf is allowed); goldleaf alone is not allowed
-            (see Goldleaf below).
+            goldleaf on top. Goldleaf alone is not allowed (see Goldleaf
+            below).
   --level   Plant level, a "Level" value from that plant's csv (1-10).
   --addonlevel  <plant>+shinevine / <plant>+goldleaf only: the shinevine's or
             goldleaf's level (1-10; default: same as --level).
@@ -27,11 +26,11 @@ Arguments:
             with the longer recharge (recharge) or the one with the higher
             sun production (production; final stage for sunshroom, the
             amplifier is ignored). It is an error if the two plants tie.
-  --positions  Required for moonflower and moonflower+goldleaf, not used by other
-            plants. One X,Y tile per moonflower, X in 1-9 and Y in 1-5, in
-            planting order, e.g. --positions 1,1 2,1 2,2. The number of tiles
-            must equal --count and tiles must be distinct. A goldleaf goes on
-            the tile of the moonflower it pairs with.
+  --positions  Required for moonflower and moonflower+shinevine/goldleaf, not used
+            by other plants. One X,Y tile per moonflower, X in 1-9 and Y in 1-5,
+            in planting order, e.g. --positions 1,1 2,1 2,2. The number of tiles
+            must equal --count and tiles must be distinct. A shinevine or
+            goldleaf goes on the tile of the moonflower it pairs with.
   --duration  Simulated time in full seconds (default: 180).
   --start-sun  Sun available at second 0 (default: 75).
   --night   No sun falls from the sky.
@@ -53,7 +52,8 @@ settings share a file. A row with the same first two cells (plant and level) is 
 instead of duplicated.
 For moonflower the first cell is moonflower(<positions>), e.g.
 moonflower(1,1 2,1 2,2), so different layouts can be told apart (for
-moonflower+goldleaf: moonflower+goldleaf(<strategy>)(<positions>)).
+moonflower+shinevine: moonflower+shinevine(<strategy>)(<positions>), likewise
+for moonflower+goldleaf).
 
 Example:
   python3 sun_timeline.py --plant sunflower --level 3 --count 4
@@ -61,6 +61,7 @@ Example:
   (both rows end up in output/sun_timeline_4_plants.csv)
   python3 sun_timeline.py --plant moonflower --level 5 --count 3 --positions 1,1 2,1 2,2
   python3 sun_timeline.py --plant sunflower+shinevine --level 5 --addonlevel 3 --count 2 --strategy cost
+  python3 sun_timeline.py --plant moonflower+shinevine --level 5 --count 2 --strategy cost --positions 1,1 2,1
 
 Shinevine+<plant>: each plant type has its own recharge timer and sun is shared;
 whichever type is ready and affordable is planted next (--strategy picks the
@@ -69,7 +70,8 @@ The n-th shinevine pairs
 with the n-th <plant>, whichever of the two is planted first (a shinevine may
 go on an empty tile). Once both are out, that <plant> produces extra sun equal
 to the shinevine's Sun Production Amplifier on every production, and the
-shinevine produces its own sun too.
+shinevine produces its own sun too. The amplifier does not work on moonflower:
+a moonflower+shinevine pair only gets the shinevine's own sun.
 For <plant>+shinevine the second cell is <plant level>/<addonlevel>.
 
 Goldleaf+<plant> (<plant>+goldleaf): works like the shinevine pairing (the n-th
@@ -215,7 +217,8 @@ class Shinevine(FlatSunProducer, Addon):
         self.amplifier = int(row["Sun Production Amplifier"])
 
     def bonus_production_due(self, t, host, addon):
-        return production_due(t, host)
+        # The amplifier does not work on moonflower.
+        return not isinstance(host.plant, Moonflower) and production_due(t, host)
 
     def bonus_value(self):
         return self.amplifier
@@ -469,7 +472,7 @@ def main():
                          "are ready and affordable: the cheaper, the longer-recharging or the "
                          "higher-producing one")
     ap.add_argument("--positions", nargs="+", metavar="X,Y",
-                    help="moonflower and moonflower+goldleaf only: one X,Y tile per moonflower "
+                    help="moonflower and moonflower+shinevine/goldleaf only: one X,Y tile per moonflower "
                          "(x 1-9, y 1-5), in planting order; count must equal --count")
     ap.add_argument("--duration", type=int, default=DEFAULT_DURATION,
                     help=f"simulated time in full seconds (default: {DEFAULT_DURATION})")
@@ -493,8 +496,6 @@ def main():
     partner = name.rsplit("+", 1)[1] if name.endswith(("+shinevine", "+goldleaf")) else None
     if partner:
         base_name = name.rsplit("+", 1)[0]
-        if base_name == "moonflower" and partner == "shinevine":
-            sys.exit("moonflower cannot be combined with shinevine")
         if base_name == "goldleaf" or base_name == partner:
             sys.exit(f"{partner} cannot be planted on {base_name}")
         partner_level = args.level if args.addonlevel is None else args.addonlevel
