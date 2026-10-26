@@ -3,7 +3,8 @@
 
 Usage: sun_timeline.py --plant NAME --level N --count N [--addonlevel N]
                        [--strategy cost|recharge|production]
-                       [--positions X,Y ...] [--outdir DIR]
+                       [--positions X,Y ...] [--duration SECONDS]
+                       [--start-sun N] [--night] [--outdir DIR]
 
 Arguments:
   --plant   Plant name, same as a file in plants/ without ".csv"
@@ -31,15 +32,21 @@ Arguments:
             planting order, e.g. --positions 1,1 2,1 2,2. The number of tiles
             must equal --count and tiles must be distinct. A goldleaf goes on
             the tile of the moonflower it pairs with.
+  --duration  Simulated time in full seconds (default: 180).
+  --start-sun  Sun available at second 0 (default: 75).
+  --night   No sun falls from the sky.
   --outdir  Where to write the output file (default: output/ next to this
             script; created if missing).
 
 Plant stats (cost, recharge, sun production) are read from plants/<plant>.csv.
 Twinsunflower and shinevine start with their seed packet recharging, so they
 are first available after one recharge time instead of at 0 s.
-The result row (plant, level, sun at second 0, 1, ... 180) is appended to
+The result row (plant, level, sun at second 0, 1, ... --duration) is appended to
 sun_timeline_<count>_plants.csv, so runs with the same --count share one
-file. A row with the same first two cells (plant and level) is replaced
+file. Non-default --duration, --start-sun and --night are added to the file
+name as _<duration>s, _start<N> and _night (in that order), e.g.
+sun_timeline_4_plants_120s_start50_night.csv, so only runs with the same
+settings share a file. A row with the same first two cells (plant and level) is replaced
 instead of duplicated.
 For moonflower the first cell is moonflower(<positions>), e.g.
 moonflower(1,1 2,1 2,2), so different layouts can be told apart (for
@@ -88,8 +95,8 @@ HERE = Path(__file__).resolve().parent
 PLANTS_DIR = HERE / "plants"
 
 STEP_MS = 250
-DURATION_MS = 180_000
-START_SUN = 75
+DEFAULT_DURATION = 180
+DEFAULT_START_SUN = 75
 PLANT_DELAY_MS = 1000
 FIRST_PRODUCTION_MS = 14_000
 PRODUCTION_PERIOD_MS = 34_000
@@ -346,10 +353,13 @@ STRATEGIES = {
 }
 
 
-def simulate(pairing, count, positions=None, strategy=None):
-    """Return the available sun at seconds 0..180.
+def simulate(pairing, count, positions=None, strategy=None,
+             duration=DEFAULT_DURATION, start_sun=DEFAULT_START_SUN, night=False):
+    """Return the available sun at seconds 0..duration.
 
     pairing is the Pairing to plant; count of each of its plants is planted.
+    duration is the simulated time in full seconds; start_sun is the sun at second 0.
+    night disables the sun falling from the sky.
     positions[i] is the tile of the i-th planted plant (moonflower only).
     strategy decides which plant is planted first when both are ready and
     affordable, as ordered by STRATEGIES (required when there is an addon).
@@ -357,14 +367,14 @@ def simulate(pairing, count, positions=None, strategy=None):
     plants = pairing.plants
     order = sorted(plants, key=STRATEGIES[strategy]) if strategy else [pairing.base]
 
-    sun = START_SUN
+    sun = start_sun
     lawn = Lawn(pairing)
     pending = None  # the Pending planting, if any
     recharge_ready = {p: p.recharge_ms if p.starts_recharging else 0 for p in plants}
     timeline = []
 
-    for t in range(0, DURATION_MS + 1, STEP_MS):
-        if t >= SKY_FIRST_MS and (t - SKY_FIRST_MS) % SKY_PERIOD_MS == 0:
+    for t in range(0, duration * 1000 + 1, STEP_MS):
+        if not night and t >= SKY_FIRST_MS and (t - SKY_FIRST_MS) % SKY_PERIOD_MS == 0:
             sun += SKY_SUN
         for p in lawn.plants:
             if isinstance(p.plant, SunProducer) and production_due(t, p):
@@ -433,9 +443,19 @@ def main():
     ap.add_argument("--positions", nargs="+", metavar="X,Y",
                     help="moonflower and moonflower+goldleaf only: one X,Y tile per moonflower "
                          "(x 1-9, y 1-5), in planting order; count must equal --count")
+    ap.add_argument("--duration", type=int, default=DEFAULT_DURATION,
+                    help=f"simulated time in full seconds (default: {DEFAULT_DURATION})")
+    ap.add_argument("--start-sun", type=int, default=DEFAULT_START_SUN,
+                    help=f"sun at second 0 (default: {DEFAULT_START_SUN})")
+    ap.add_argument("--night", action="store_true",
+                    help="no sun falls from the sky")
     ap.add_argument("--outdir", type=Path, default=HERE / "output",
                     help="directory for the output file (default: output/ next to the script)")
     args = ap.parse_args()
+    if args.duration <= 0:
+        sys.exit("--duration must be positive")
+    if args.start_sun < 0:
+        sys.exit("--start-sun must not be negative")
     if not 1 <= args.count <= MAX_COUNT:
         sys.exit(f"count must be 1-{MAX_COUNT} ({GRID_COLUMNS}x{GRID_ROWS} tiles)")
 
@@ -473,12 +493,20 @@ def main():
         positions = parse_positions(args.positions, args.count)
     elif args.positions:
         sys.exit(f"--positions is only used when moonflower is present in --plant, not '{name}'")
-    timeline = simulate(pairing, args.count, positions, args.strategy)
+    timeline = simulate(pairing, args.count, positions, args.strategy, args.duration, args.start_sun,
+                        args.night)
 
     if positions:
         label += "(" + " ".join(f"{x},{y}" for x, y in positions) + ")"
+    suffix = ""
+    if args.duration != DEFAULT_DURATION:
+        suffix += f"_{args.duration}s"
+    if args.start_sun != DEFAULT_START_SUN:
+        suffix += f"_start{args.start_sun}"
+    if args.night:
+        suffix += "_night"
     args.outdir.mkdir(parents=True, exist_ok=True)
-    write_row(args.outdir / f"sun_timeline_{args.count}_plants.csv",
+    write_row(args.outdir / f"sun_timeline_{args.count}_plants{suffix}.csv",
               [label, str(level_cell), *map(str, timeline)])
 
 
