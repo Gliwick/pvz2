@@ -10,8 +10,9 @@ Arguments:
             (sunflower, twinsunflower, primalsunflower, shinevine, sunshroom,
             moonflower), or <plant>+shinevine / <plant>+goldleaf (e.g.
             sunflower+shinevine) to plant pairs of <plant> with a shinevine or
-            goldleaf on top. Moonflower and shinevine cannot be combined with
-            shinevine; goldleaf alone is not allowed (see Goldleaf below).
+            goldleaf on top. Moonflower cannot be combined with shinevine
+            (moonflower+goldleaf is allowed); goldleaf alone is not allowed
+            (see Goldleaf below).
   --level   Plant level, a "Level" value from that plant's csv (1-10).
   --addonlevel  <plant>+shinevine / <plant>+goldleaf only: the shinevine's or
             goldleaf's level (1-10; default: same as --level).
@@ -25,10 +26,11 @@ Arguments:
             with the longer recharge (recharge) or the one with the higher
             sun production (production; final stage for sunshroom, the
             amplifier is ignored). It is an error if the two plants tie.
-  --positions  Required for moonflower, not used by other plants. One X,Y tile
-            per plant, X in 1-9 and Y in 1-5, in planting order, e.g.
-            --positions 1,1 2,1 2,2. The number of tiles must equal --count
-            and tiles must be distinct.
+  --positions  Required for moonflower and moonflower+goldleaf, not used by other
+            plants. One X,Y tile per moonflower, X in 1-9 and Y in 1-5, in
+            planting order, e.g. --positions 1,1 2,1 2,2. The number of tiles
+            must equal --count and tiles must be distinct. A goldleaf goes on
+            the tile of the moonflower it pairs with.
   --outdir  Where to write the output file (default: output/ next to this
             script; created if missing).
 
@@ -40,7 +42,8 @@ sun_timeline_<count>_plants.csv, so runs with the same --count share one
 file. A row with the same first two cells (plant and level) is replaced
 instead of duplicated.
 For moonflower the first cell is moonflower(<positions>), e.g.
-moonflower(1,1 2,1 2,2), so different layouts can be told apart.
+moonflower(1,1 2,1 2,2), so different layouts can be told apart (for
+moonflower+goldleaf: moonflower+goldleaf(<strategy>)(<positions>)).
 
 Example:
   python3 sun_timeline.py --plant sunflower --level 3 --count 4
@@ -67,7 +70,7 @@ out, the first time right when the later of the two is planted. For --strategy
 production goldleaf counts as 50. Like shinevine, goldleaf starts with its seed
 packet recharging. shinevine+goldleaf is allowed (the tile is occupied by the
 shinevine; the shinevine's own sun is unchanged); goldleaf+shinevine is not.
-Not usable alone, nor with moonflower.
+Not usable alone. With moonflower, the goldleaf does not count as a neighbour.
 
 Moonflower produces min(Base Sun Production * (1 + adjacent moonflowers),
 Max Sun Production). Adjacent means within 1 tile horizontally, vertically or
@@ -123,11 +126,11 @@ class SunProducer(Plant):
     """Base class for sun-producing plants; subclasses define how much sun is produced."""
 
     @abstractmethod
-    def production(self, age_ms, neighbors=0):
-        """Sun produced by a plant of the given age (ms since planting).
+    def production(self, age_ms, planted, lawn):
+        """Sun produced by `planted`, a copy of this plant that is age_ms (ms) old.
 
-        neighbors is the number of adjacent plants of the same kind; only
-        plants that care about it (moonflower) use it.
+        lawn is the Lawn it stands on; only plants that care about their
+        surroundings (moonflower) use it.
         """
 
 
@@ -156,7 +159,7 @@ class FlatPlant(SunProducer):
         super().__init__(row)
         self.sun = int(row["Sun Production"])
 
-    def production(self, age_ms, neighbors=0):
+    def production(self, age_ms, planted, lawn):
         return self.sun
 
     def peak_production(self):
@@ -207,7 +210,7 @@ class Sunshroom(SunProducer):
         self.stages = [int(row[f"Sun Production {s}"]) for s in ("Small", "Medium", "Big")]
         self.growth_ms = ms(row["Growth Time"])
 
-    def production(self, age_ms, neighbors=0):
+    def production(self, age_ms, planted, lawn):
         return self.stages[min(age_ms // self.growth_ms, 2)]
 
     def peak_production(self):
@@ -222,8 +225,17 @@ class Moonflower(SunProducer):
         self.sun = int(row["Base Sun Production"])
         self.max_sun = int(row["Max Sun Production"])
 
-    def production(self, age_ms, neighbors=0):
-        return min(self.sun * (1 + neighbors), self.max_sun)
+    @staticmethod
+    def adjacent(a, b):
+        """Whether tiles a and b are within 1 tile of each other (including diagonals)."""
+        return abs(a[0] - b[0]) <= 1 and abs(a[1] - b[1]) <= 1
+
+    def neighbors(self, planted, lawn):
+        """Number of other moonflowers on the lawn adjacent to `planted`."""
+        return sum(1 for o in lawn.by_type[self] if o is not planted and self.adjacent(o.tile, planted.tile))
+
+    def production(self, age_ms, planted, lawn):
+        return min(self.sun * (1 + self.neighbors(planted, lawn)), self.max_sun)
 
     def peak_production(self):
         return self.max_sun
@@ -261,11 +273,6 @@ def production_due(t, planted):
     """Whether a plant planted as `planted` produces sun at time t (ms)."""
     since = t - planted.at - FIRST_PRODUCTION_MS
     return since >= 0 and since % PRODUCTION_PERIOD_MS == 0
-
-
-def adjacent(a, b):
-    """Whether tiles a and b are within 1 tile of each other (including diagonals)."""
-    return abs(a[0] - b[0]) <= 1 and abs(a[1] - b[1]) <= 1
 
 
 def parse_positions(tokens, count):
@@ -315,7 +322,6 @@ class Planted:
     plant: Plant  # the Plant it is a copy of
     at: int  # planting time, ms
     tile: tuple = None  # (x, y), moonflower only
-    neighbors: int = 0  # adjacent plants on the lawn, updated as plants land
 
 
 class Lawn:
@@ -328,11 +334,6 @@ class Lawn:
     def plant(self, plant, t, tile=None):
         """Put a plant of the given type down at time t (ms) and return it."""
         planted = Planted(plant, t, tile)
-        if tile:
-            for o in self.plants:
-                if adjacent(o.tile, tile):
-                    o.neighbors += 1
-                    planted.neighbors += 1
         self.plants.append(planted)
         self.by_type[plant].append(planted)
         return planted
@@ -367,12 +368,14 @@ def simulate(pairing, count, positions=None, strategy=None):
             sun += SKY_SUN
         for p in lawn.plants:
             if isinstance(p.plant, SunProducer) and production_due(t, p):
-                sun += p.plant.production(t - p.at, p.neighbors)
+                sun += p.plant.production(t - p.at, p, lawn)
         if pending and pending.at <= t:
             plant = pending.plant
             pending = None
             sun -= plant.cost
-            lawn.plant(plant, t, positions[len(lawn.plants)] if positions else None)
+            # Only the base plant has a tile; an addon shares the tile of the base plant it pairs with (even if it is planted first).
+            tile = positions[len(lawn.by_type[plant])] if positions and plant is pairing.base else None
+            lawn.plant(plant, t, tile)
             # Cost and recharge start on landing, not on selection: this emulates the
             # delay between a human selecting a plant and actually planting it.
             recharge_ready[plant] = t + plant.recharge_ms
@@ -428,8 +431,8 @@ def main():
                          "are ready and affordable: the cheaper, the longer-recharging or the "
                          "higher-producing one")
     ap.add_argument("--positions", nargs="+", metavar="X,Y",
-                    help="moonflower only: one X,Y tile per plant (x 1-9, y 1-5), "
-                         "in planting order; count must equal --count")
+                    help="moonflower and moonflower+goldleaf only: one X,Y tile per moonflower "
+                         "(x 1-9, y 1-5), in planting order; count must equal --count")
     ap.add_argument("--outdir", type=Path, default=HERE / "output",
                     help="directory for the output file (default: output/ next to the script)")
     args = ap.parse_args()
@@ -442,8 +445,8 @@ def main():
     partner = name.rsplit("+", 1)[1] if name.endswith(("+shinevine", "+goldleaf")) else None
     if partner:
         base_name = name.rsplit("+", 1)[0]
-        if base_name == "moonflower":
-            sys.exit(f"moonflower cannot be combined with {partner}")
+        if base_name == "moonflower" and partner == "shinevine":
+            sys.exit("moonflower cannot be combined with shinevine")
         if base_name == "goldleaf" or base_name == partner:
             sys.exit(f"{partner} cannot be planted on {base_name}")
         partner_level = args.level if args.addonlevel is None else args.addonlevel
@@ -464,12 +467,12 @@ def main():
             sys.exit("goldleaf makes no sun on its own; use <plant>+goldleaf")
         pairing = Pairing(load_plant(name, args.level))
     positions = None
-    if name == "moonflower":
+    if isinstance(pairing.base, Moonflower):
         if not args.positions:
-            sys.exit("moonflower requires --positions")
+            sys.exit(f"{name} requires --positions")
         positions = parse_positions(args.positions, args.count)
     elif args.positions:
-        sys.exit(f"--positions is only used for moonflower, not '{name}'")
+        sys.exit(f"--positions is only used when moonflower is present in --plant, not '{name}'")
     timeline = simulate(pairing, args.count, positions, args.strategy)
 
     if positions:
