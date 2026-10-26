@@ -20,11 +20,14 @@ Arguments:
             per plant, X in 1-9 and Y in 1-5, in planting order, e.g.
             --positions 1,1 2,1 2,2. The number of tiles must equal --count
             and tiles must be distinct.
-  --outdir  Where to write the output file (default: next to this script).
+  --outdir  Where to write the output file (default: output/ next to this
+            script; created if missing).
 
 Plant stats (cost, recharge, sun production) are read from plants/<plant>.csv.
+Twinsunflower and shinevine start with their seed packet recharging, so they
+are first available after one recharge time instead of at 0 s.
 The result row (plant, level, sun at second 0, 1, ... 180) is appended to
-<count>.csv, so runs with the same --count share one file. A row with the same
+sun_timeline_<count>_plants.csv, so runs with the same --count share one file. A row with the same
 first two cells (plant and level) is replaced instead of duplicated.
 For moonflower the first cell is moonflower(<positions>), e.g.
 moonflower(1,1 2,1 2,2), so different layouts can be told apart.
@@ -77,6 +80,9 @@ def ms(seconds):
 class Plant(ABC):
     """Base class for sun-producing plants; subclasses define how much sun is produced."""
 
+    # Whether the seed packet must recharge once before the first planting.
+    starts_recharging = False
+
     def __init__(self, row):
         self.cost = int(row["Cost"])
         self.recharge_ms = ms(row["Recharge"])
@@ -101,8 +107,16 @@ class FlatPlant(Plant):
         return self.sun
 
 
+class Twinsunflower(FlatPlant):
+    """Flat producer that cannot be planted until its first recharge is done."""
+
+    starts_recharging = True
+
+
 class Shinevine(FlatPlant):
     """Flat producer whose amplifier is added to the plant it is planted on."""
+
+    starts_recharging = True
 
     def __init__(self, row):
         super().__init__(row)
@@ -136,7 +150,7 @@ class Moonflower(Plant):
 PLANT_CLASSES = {
     "moonflower": Moonflower,
     "sunflower": FlatPlant,
-    "twinsunflower": FlatPlant,
+    "twinsunflower": Twinsunflower,
     "primalsunflower": FlatPlant,
     "shinevine": Shinevine,
     "sunshroom": Sunshroom,
@@ -199,7 +213,7 @@ def simulate(plants, count, positions=None):
     sun = START_SUN
     lawn = []
     pending = []  # (kind, planting time) of plantings waiting out the delay
-    recharge_ready = [0] * len(plants)
+    recharge_ready = [p.recharge_ms if p.starts_recharging else 0 for p in plants]
     timeline = []
 
     def planted_count(kind):
@@ -258,7 +272,7 @@ def write_row(path, row):
 
 
 def main():
-    """Parse arguments, run the simulation and append the result row to <count>.csv."""
+    """Parse arguments, run the simulation and append the result row to the output file."""
     ap = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
         epilog=__doc__.split("Arguments:", 1)[1],
@@ -273,8 +287,8 @@ def main():
     ap.add_argument("--positions", nargs="+", metavar="X,Y",
                     help="moonflower only: one X,Y tile per plant (x 1-9, y 1-5), "
                          "in planting order; count must equal --count")
-    ap.add_argument("--outdir", type=Path, default=HERE,
-                    help="directory for the <count>.csv output file (default: script directory)")
+    ap.add_argument("--outdir", type=Path, default=HERE / "output",
+                    help="directory for the output file (default: output/ next to the script)")
     args = ap.parse_args()
     if args.count < 1:
         sys.exit("count must be at least 1")
@@ -306,7 +320,9 @@ def main():
 
     if positions:
         label += "(" + " ".join(f"{x},{y}" for x, y in positions) + ")"
-    write_row(args.outdir / f"sun_timeline_{args.count}_plants.csv", [label, str(level_cell), *map(str, timeline)])
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    write_row(args.outdir / f"sun_timeline_{args.count}_plants.csv",
+              [label, str(level_cell), *map(str, timeline)])
 
 
 if __name__ == "__main__":
