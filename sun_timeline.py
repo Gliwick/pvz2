@@ -7,15 +7,23 @@ Usage: sun_timeline.py --plant NAME --level N --count N [--shinevinelevel N]
 Arguments:
   --plant   Plant name, same as a file in plants/ without ".csv"
             (sunflower, twinsunflower, primalsunflower, shinevine, sunshroom,
-            moonflower), or shinevine+<plant> (e.g. shinevine+sunflower) to
+            moonflower), or <plant>+shinevine (e.g. sunflower+shinevine) to
             plant pairs of <plant> with a shinevine on top. Moonflower and
             shinevine cannot be combined with shinevine.
   --level   Plant level, a "Level" value from that plant's csv (1-10).
-  --shinevinelevel  shinevine+<plant> only: the shinevine's level
+  --shinevinelevel  <plant>+shinevine only: the shinevine's level
+            (default: same as --level).
+  --goldleaflevel  <plant>+goldleaf only: the goldleaf's level
             (default: same as --level).
   --count   How many of the plant to plant in total; nothing else is planted
-            until this many are out. Must be at least 1. For shinevine+<plant>
+            until this many are out. Must be at least 1. For <plant>+shinevine
             it is the number of pairs (count <plant> plus count shinevines).
+  --strategy  Required for <plant>+shinevine, not used otherwise: cost,
+            recharge or production. Decides which plant is planted first when
+            both are ready and affordable: the cheaper one (cost), the one
+            with the longer recharge (recharge) or the one with the higher
+            sun production (production; final stage for sunshroom, the
+            amplifier is ignored). It is an error if the two plants tie.
   --positions  Required for moonflower, not used by other plants. One X,Y tile
             per plant, X in 1-9 and Y in 1-5, in planting order, e.g.
             --positions 1,1 2,1 2,2. The number of tiles must equal --count
@@ -37,15 +45,26 @@ Example:
   python3 sun_timeline.py --plant sunshroom --level 10 --count 4
   (both rows end up in 4.csv)
   python3 sun_timeline.py --plant moonflower --level 5 --count 3 --positions 1,1 2,1 2,2
-  python3 sun_timeline.py --plant shinevine+sunflower --level 5 --shinevinelevel 3 --count 2
+  python3 sun_timeline.py --plant sunflower+shinevine --level 5 --shinevinelevel 3 --count 2 --strategy cost
 
 Shinevine+<plant>: each plant type has its own recharge timer and sun is shared;
-whichever type is ready and affordable is planted next. The n-th shinevine pairs
+whichever type is ready and affordable is planted next (--strategy picks the
+one to go first if both are). The first cell is <plant>+shinevine(<strategy>). The n-th shinevine pairs
 with the n-th <plant>, whichever of the two is planted first (a shinevine may
 go on an empty tile). Once both are out, that <plant> produces extra sun equal
 to the shinevine's Sun Production Amplifier on every production, and the
 shinevine produces its own sun too.
-For shinevine+<plant> the second cell is <shinevinelevel>/<plant level>.
+For <plant>+shinevine the second cell is <plant level>/<shinevinelevel>.
+
+Goldleaf+<plant> (<plant>+goldleaf): works like the shinevine pairing (the n-th
+goldleaf goes with the n-th <plant>, either may be planted first, --strategy
+and --goldleaflevel apply, the second cell is <plant level>/<goldleaflevel>), but
+goldleaf makes no sun itself. Its tile gives 50 sun every 20 s once both are
+out, the first time right when the later of the two is planted. For --strategy
+production goldleaf counts as 50. Like shinevine, goldleaf starts with its seed
+packet recharging. shinevine+goldleaf is allowed (the tile is occupied by the
+shinevine; the shinevine's own sun is unchanged); goldleaf+shinevine is not.
+Not usable alone, nor with moonflower.
 
 Moonflower produces min(Base Sun Production * (1 + adjacent moonflowers),
 Max Sun Production). Adjacent means within 1 tile horizontally, vertically or
@@ -82,6 +101,8 @@ class Plant(ABC):
 
     # Whether the seed packet must recharge once before the first planting.
     starts_recharging = False
+    # False for plants that make no sun on their own (goldleaf).
+    produces_itself = True
 
     def __init__(self, row):
         self.cost = int(row["Cost"])
@@ -95,6 +116,10 @@ class Plant(ABC):
         plants that care about it (moonflower) use it.
         """
 
+    @abstractmethod
+    def peak_production(self):
+        """Most sun one production can give, ignoring any shinevine amplifier."""
+
 
 class FlatPlant(Plant):
     """Plant that always produces the same amount of sun."""
@@ -104,6 +129,9 @@ class FlatPlant(Plant):
         self.sun = int(row["Sun Production"])
 
     def production(self, age_ms, neighbors=0):
+        return self.sun
+
+    def peak_production(self):
         return self.sun
 
 
@@ -123,6 +151,21 @@ class Shinevine(FlatPlant):
         self.amplifier = int(row["Sun Production Amplifier"])
 
 
+class Goldleaf(Plant):
+    """Makes no sun itself; its tile gives sun every period while a plant occupies it."""
+
+    starts_recharging = True
+    produces_itself = False
+    sun = 50
+    period_ms = 20_000
+
+    def production(self, age_ms, neighbors=0):
+        return self.sun
+
+    def peak_production(self):
+        return self.sun
+
+
 class Sunshroom(Plant):
     """Small -> medium after Growth Time, medium -> big after another one."""
 
@@ -133,6 +176,9 @@ class Sunshroom(Plant):
 
     def production(self, age_ms, neighbors=0):
         return self.stages[min(age_ms // self.growth_ms, 2)]
+
+    def peak_production(self):
+        return self.stages[-1]
 
 
 class Moonflower(Plant):
@@ -146,6 +192,9 @@ class Moonflower(Plant):
     def production(self, age_ms, neighbors=0):
         return min(self.sun * (1 + neighbors), self.max_sun)
 
+    def peak_production(self):
+        return self.max_sun
+
 
 PLANT_CLASSES = {
     "moonflower": Moonflower,
@@ -153,6 +202,7 @@ PLANT_CLASSES = {
     "twinsunflower": Twinsunflower,
     "primalsunflower": FlatPlant,
     "shinevine": Shinevine,
+    "goldleaf": Goldleaf,
     "sunshroom": Sunshroom,
 }
 
@@ -203,13 +253,25 @@ class Planted:
         self.tile = tile  # (x, y), moonflower only
 
 
-def simulate(plants, count, positions=None):
+STRATEGIES = {
+    "cost": lambda plant: plant.cost,
+    "recharge": lambda plant: -plant.recharge_ms,
+    "production": lambda plant: -plant.peak_production(),
+}
+
+
+def simulate(plants, count, positions=None, strategy=None):
     """Return the available sun at seconds 0..180.
 
     plants is [plant] or, for a shinevine combination, [plant, shinevine];
     count of each kind is planted. positions[i] is the tile of the i-th
-    planted plant (moonflower only).
+    planted plant (moonflower only). strategy decides which kind is planted
+    first when several are ready and affordable, as ordered by STRATEGIES
+    (required when there is more than one kind).
     """
+    order = sorted(range(len(plants)), key=lambda k: STRATEGIES[strategy](plants[k])) \
+        if strategy else [0]
+
     sun = START_SUN
     lawn = []
     pending = []  # (kind, planting time) of plantings waiting out the delay
@@ -224,12 +286,15 @@ def simulate(plants, count, positions=None):
             sun += SKY_SUN
         tiles = [p.tile for p in lawn]
         for p in lawn:
+            if not plants[p.kind].produces_itself:
+                continue
             since = t - p.at - FIRST_PRODUCTION_MS
             if since >= 0 and since % PRODUCTION_PERIOD_MS == 0:
                 neighbors = count_neighbors(p.tile, tiles) if positions else 0
                 sun += plants[p.kind].production(t - p.at, neighbors)
                 # The n-th shinevine pairs with the n-th plant, whichever went down first.
-                if p.kind == 0 and len(plants) > 1 and planted_count(1) > p.index:
+                if (p.kind == 0 and len(plants) > 1 and isinstance(plants[1], Shinevine)
+                        and planted_count(1) > p.index):
                     sun += plants[1].amplifier
         for kind, at in pending:
             if at != t:
@@ -239,17 +304,26 @@ def simulate(plants, count, positions=None):
             lawn.append(Planted(kind, t, planted_count(kind), tile))
             recharge_ready[kind] = t + plants[kind].recharge_ms
         pending = [(kind, at) for kind, at in pending if at != t]
-        # Plant whichever kinds are ready; the earliest recharged goes first.
-        reserved = sum(plants[kind].cost for kind, _ in pending)
-        for kind in sorted(range(len(plants)), key=lambda k: recharge_ready[k]):
+        # A goldleaf tile pays out from the moment both it and its plant are down
+        # (so right after the planting above), then every period.
+        for g in lawn:
+            if plants[g.kind].produces_itself:
+                continue
+            host = next((p for p in lawn if p.kind == 0 and p.index == g.index), None)
+            if host is None:
+                continue
+            since = t - max(g.at, host.at)
+            if since % plants[g.kind].period_ms == 0:
+                sun += plants[g.kind].sun
+        # Plant whichever kinds are ready; the strategy decides who goes first.
+        for kind in order:
+            if pending:  # one planting at a time, so plantings are at least a delay apart
+                break
             plant = plants[kind]
-            in_flight = planted_count(kind) + sum(1 for k, _ in pending if k == kind)
-            if (in_flight >= count or t < recharge_ready[kind]
-                    or any(k == kind for k, _ in pending)
-                    or sun - reserved < plant.cost):
+            if (planted_count(kind) >= count or t < recharge_ready[kind]
+                    or sun < plant.cost):
                 continue
             pending.append((kind, t + PLANT_DELAY_MS))
-            reserved += plant.cost
         if t % 1000 == 0:
             timeline.append(sun)
     return timeline
@@ -281,9 +355,15 @@ def main():
                     help=f"plant name, one of: {', '.join(sorted(PLANT_CLASSES))}")
     ap.add_argument("--level", type=int, required=True, help="plant level (as in the plant's csv)")
     ap.add_argument("--count", type=int, required=True,
-                    help="amount of sun producers to plant (pairs for shinevine+<plant>)")
+                    help="amount of sun producers to plant (pairs for <plant>+shinevine)")
     ap.add_argument("--shinevinelevel", type=int,
-                    help="shinevine+<plant> only: shinevine level (default: same as --level)")
+                    help="<plant>+shinevine only: shinevine level (default: same as --level)")
+    ap.add_argument("--goldleaflevel", type=int,
+                    help="<plant>+goldleaf only: goldleaf level (default: same as --level)")
+    ap.add_argument("--strategy", choices=sorted(STRATEGIES),
+                    help="<plant>+shinevine or <plant>+goldleaf only (required): which plant goes first when both "
+                         "are ready and affordable: the cheaper, the longer-recharging or the "
+                         "higher-producing one")
     ap.add_argument("--positions", nargs="+", metavar="X,Y",
                     help="moonflower only: one X,Y tile per plant (x 1-9, y 1-5), "
                          "in planting order; count must equal --count")
@@ -296,18 +376,34 @@ def main():
     name = args.plant.lower()
     label = name
     level_cell = args.level
-    if name.startswith("shinevine+"):
-        base_name = name.split("+", 1)[1]
+    partner = name.rsplit("+", 1)[1] if name.endswith(("+shinevine", "+goldleaf")) else None
+    if partner:
+        base_name = name.rsplit("+", 1)[0]
         if base_name == "moonflower":
-            sys.exit("moonflower is incompatible with shinevine")
-        if base_name == "shinevine":
-            sys.exit("shinevine cannot be planted on shinevine")
-        vine_level = args.shinevinelevel or args.level
-        plants = [load_plant(base_name, args.level), load_plant("shinevine", vine_level)]
-        level_cell = f"{vine_level}/{args.level}"
+            sys.exit(f"moonflower cannot be combined with {partner}")
+        if base_name == "goldleaf" or base_name == partner:
+            sys.exit(f"{partner} cannot be planted on {base_name}")
+        own_arg, other_arg = ((args.shinevinelevel, args.goldleaflevel) if partner == "shinevine"
+                              else (args.goldleaflevel, args.shinevinelevel))
+        if other_arg:
+            sys.exit(f"the other partner's level option is not used for <plant>+{partner}")
+        partner_level = own_arg or args.level
+        plants = [load_plant(base_name, args.level), load_plant(partner, partner_level)]
+        level_cell = f"{args.level}/{partner_level}"
+        if not args.strategy:
+            sys.exit(f"<plant>+{partner} requires --strategy cost|recharge|production")
+        keys = {STRATEGIES[args.strategy](p) for p in plants}
+        if len(keys) < len(plants):
+            sys.exit(f"--strategy {args.strategy} is a tie between {base_name} and {partner}")
+        label += f"({args.strategy})"
     else:
-        if args.shinevinelevel:
-            sys.exit("--shinevinelevel is only used for shinevine+<plant>")
+        if args.shinevinelevel or args.goldleaflevel:
+            sys.exit("--shinevinelevel/--goldleaflevel are only used for <plant>+shinevine "
+                     "or <plant>+goldleaf")
+        if args.strategy:
+            sys.exit("--strategy is only used for <plant>+shinevine and <plant>+goldleaf")
+        if name == "goldleaf":
+            sys.exit("goldleaf makes no sun on its own; use <plant>+goldleaf")
         plants = [load_plant(name, args.level)]
     positions = None
     if name == "moonflower":
@@ -316,7 +412,7 @@ def main():
         positions = parse_positions(args.positions, args.count)
     elif args.positions:
         sys.exit(f"--positions is only used for moonflower, not '{name}'")
-    timeline = simulate(plants, args.count, positions)
+    timeline = simulate(plants, args.count, positions, args.strategy)
 
     if positions:
         label += "(" + " ".join(f"{x},{y}" for x, y in positions) + ")"
