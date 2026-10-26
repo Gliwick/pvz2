@@ -8,8 +8,8 @@ Usage: sun_timeline.py --plant NAME --level N --count N [--addonlevel N]
 
 Arguments:
   --plant   Plant name, same as a file in plants/ without ".csv"
-            (sunflower, twinsunflower, primalsunflower, shinevine, sunshroom,
-            moonflower), or <plant>+shinevine / <plant>+goldleaf (e.g.
+            (sunflower, twinsunflower, primalsunflower, lemonaid, shinevine,
+            sunshroom, moonflower), or <plant>+shinevine / <plant>+goldleaf (e.g.
             sunflower+shinevine) to plant pairs of <plant> with a shinevine or
             goldleaf on top. Moonflower cannot be combined with shinevine
             (moonflower+goldleaf is allowed); goldleaf alone is not allowed
@@ -40,7 +40,10 @@ Arguments:
 
 Plant stats (cost, recharge, sun production) are read from plants/<plant>.csv.
 Twinsunflower and shinevine start with their seed packet recharging, so they
-are first available after one recharge time instead of at 0 s.
+are first available after one recharge time instead of at 0 s. Lemonaid does
+too, but for its own Starting Recharge. Lemonaid produces every Sun Production
+Cooldown seconds (level dependent), counted from planting, instead of the
+14 s first / 34 s repeating production of the other plants.
 The result row (plant, level, sun at second 0, 1, ... --duration) is appended to
 sun_timeline_<count>_plants.csv, so runs with the same --count share one
 file. Non-default --duration, --start-sun and --night are added to the file
@@ -117,12 +120,11 @@ def ms(seconds):
 class Plant(ABC):
     """Anything with a seed packet: cost and recharge come from the plant's csv row."""
 
-    # Whether the seed packet must recharge once before the first planting.
-    starts_recharging = False
-
     def __init__(self, row):
         self.cost = int(row["Cost"])
         self.recharge_ms = ms(row["Recharge"])
+        # How long the seed packet recharges before the first planting.
+        self.initial_recharge_ms = 0
 
     @abstractmethod
     def peak_production(self):
@@ -131,6 +133,15 @@ class Plant(ABC):
 
 class SunProducer(Plant):
     """Base class for sun-producing plants; subclasses define how much sun is produced."""
+
+    # Time from planting to the first production, and the time between productions.
+    first_production_ms = FIRST_PRODUCTION_MS
+    period_ms = PRODUCTION_PERIOD_MS
+
+    def due(self, age_ms):
+        """Whether a copy of this plant that is age_ms (ms) old produces sun now."""
+        since = age_ms - self.first_production_ms
+        return since >= 0 and since % self.period_ms == 0
 
     @abstractmethod
     def production(self, age_ms, planted, lawn):
@@ -144,7 +155,9 @@ class SunProducer(Plant):
 class Addon(Plant):
     """Planted on top of a base plant; the n-th addon pairs with the n-th base plant."""
 
-    starts_recharging = True
+    def __init__(self, row):
+        super().__init__(row)
+        self.initial_recharge_ms = self.recharge_ms
 
     @abstractmethod
     def bonus_production_due(self, t, host, addon):
@@ -159,7 +172,7 @@ class Addon(Plant):
         return self.bonus_value() if self.bonus_production_due(t, host, addon) else 0
 
 
-class FlatPlant(SunProducer):
+class FlatSunProducer(SunProducer):
     """Plant that always produces the same amount of sun."""
 
     def __init__(self, row):
@@ -173,13 +186,28 @@ class FlatPlant(SunProducer):
         return self.sun
 
 
-class Twinsunflower(FlatPlant):
+class Twinsunflower(FlatSunProducer):
     """Flat producer that cannot be planted until its first recharge is done."""
 
-    starts_recharging = True
+    def __init__(self, row):
+        super().__init__(row)
+        self.initial_recharge_ms = self.recharge_ms
 
 
-class Shinevine(FlatPlant, Addon):
+class Lemonaid(FlatSunProducer):
+    """Flat producer with its own starting recharge and a level-dependent production period."""
+
+    def __init__(self, row):
+        super().__init__(row)
+        self.initial_recharge_ms = ms(row["Starting Recharge"])
+        self.period_ms = ms(row["Sun Production Cooldown"])
+
+    def due(self, age_ms):
+        # No separate first production: it just produces every period since planting.
+        return age_ms > 0 and age_ms % self.period_ms == 0
+
+
+class Shinevine(FlatSunProducer, Addon):
     """Flat producer whose amplifier is added to every production of the plant it sits on."""
 
     def __init__(self, row):
@@ -250,9 +278,10 @@ class Moonflower(SunProducer):
 
 PLANT_CLASSES = {
     "moonflower": Moonflower,
-    "sunflower": FlatPlant,
+    "sunflower": FlatSunProducer,
     "twinsunflower": Twinsunflower,
-    "primalsunflower": FlatPlant,
+    "lemonaid": Lemonaid,
+    "primalsunflower": FlatSunProducer,
     "shinevine": Shinevine,
     "goldleaf": Goldleaf,
     "sunshroom": Sunshroom,
@@ -278,8 +307,7 @@ def load_plant(name, level):
 
 def production_due(t, planted):
     """Whether a plant planted as `planted` produces sun at time t (ms)."""
-    since = t - planted.at - FIRST_PRODUCTION_MS
-    return since >= 0 and since % PRODUCTION_PERIOD_MS == 0
+    return planted.plant.due(t - planted.at)
 
 
 def parse_positions(tokens, count):
@@ -370,7 +398,7 @@ def simulate(pairing, count, positions=None, strategy=None,
     sun = start_sun
     lawn = Lawn(pairing)
     pending = None  # the Pending planting, if any
-    recharge_ready = {p: p.recharge_ms if p.starts_recharging else 0 for p in plants}
+    recharge_ready = {p: p.initial_recharge_ms for p in plants}
     timeline = []
 
     for t in range(0, duration * 1000 + 1, STEP_MS):
