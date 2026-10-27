@@ -3,7 +3,7 @@
 
 Usage: run_all_plants.py --level N --count N [--positions X,Y ...]
                          [--duration SECONDS] [--start-sun N] [--night]
-                         [--outdir DIR]
+                         [--outdir DIR] [--clear]
 
 Arguments:
   --level, --count  Same for every plant, see sun_timeline.py.
@@ -11,6 +11,8 @@ Arguments:
             moonflower is skipped.
   --duration, --start-sun, --night, --outdir  Passed on to sun_timeline.py
             when given.
+  --clear   Empty the output file before the first plant is written (the
+            plants after it are still added to the same file).
 
 Goldleaf is not run: it makes no sun on its own.
 """
@@ -37,6 +39,7 @@ def main():
     ap.add_argument("--start-sun", type=int, help="sun at second 0")
     ap.add_argument("--night", action="store_true", help="no sun falls from the sky")
     ap.add_argument("--outdir", help="directory for the output files")
+    ap.add_argument("--clear", action="store_true", help="empty the output file before writing")
     args = ap.parse_args()
 
     common = ["--level", str(args.level), "--count", str(args.count)]
@@ -57,6 +60,10 @@ def main():
                 print("skipping moonflower: no --positions given", file=sys.stderr)
                 continue
             extra = ["--positions", *args.positions]
+        # Clearing on every run would leave only the last plant, so only the first run clears.
+        if args.clear:
+            extra.append("--clear")
+            args.clear = False
         print(f"== {plant}", flush=True)
         result = subprocess.run(
             [sys.executable, str(HERE / "sun_timeline.py"), "--plant", plant, *common, *extra])

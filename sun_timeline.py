@@ -4,7 +4,7 @@
 Usage: sun_timeline.py --plant NAME --level N --count N [--addonlevel N]
                        [--strategy cost|recharge|production]
                        [--positions X,Y ...] [--duration SECONDS]
-                       [--start-sun N] [--night] [--outdir DIR]
+                       [--start-sun N] [--night] [--outdir DIR] [--clear]
 
 Arguments:
   --plant   Plant name, same as a file in plants/ without ".csv"
@@ -36,6 +36,8 @@ Arguments:
   --night   No sun falls from the sky.
   --outdir  Where to write the output file (default: output/ next to this
             script; created if missing).
+  --clear   Empty the output file before writing the row, so it holds only
+            this run's row.
 
 Plant stats (cost, recharge, sun production) are read from plants/<plant>.csv.
 Twinsunflower and shinevine start with their seed packet recharging, so they
@@ -443,10 +445,13 @@ def simulate(pairing, count, positions=None, strategy=None,
     return timeline
 
 
-def write_row(path, row):
-    """Write row into the csv at path, replacing a row with the same first two cells."""
+def write_row(path, row, clear=False):
+    """Write row into the csv at path, replacing a row with the same first two cells.
+
+    With clear, the csv is emptied first, so row ends up as its only row.
+    """
     rows = []
-    if path.exists():
+    if path.exists() and not clear:
         with open(path, newline="", encoding="utf-8-sig") as f:
             rows = list(csv.reader(f))
     for i, existing in enumerate(rows):
@@ -488,6 +493,8 @@ def main():
                     help="no sun falls from the sky")
     ap.add_argument("--outdir", type=Path, default=HERE / "output",
                     help="directory for the output file (default: output/ next to the script)")
+    ap.add_argument("--clear", action="store_true",
+                    help="empty the output file before writing the row")
     args = ap.parse_args()
     if args.duration <= 0:
         sys.exit("--duration must be positive")
@@ -542,7 +549,7 @@ def main():
         suffix += "_night"
     args.outdir.mkdir(parents=True, exist_ok=True)
     write_row(args.outdir / f"sun_timeline_{args.count}_plants{suffix}.csv",
-              [label, str(level_cell), *map(str, timeline)])
+              [label, str(level_cell), *map(str, timeline)], args.clear)
 
 
 if __name__ == "__main__":
